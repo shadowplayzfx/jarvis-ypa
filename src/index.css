@@ -37,7 +37,7 @@
 }
 
 .jarvis-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 188, 212, 0.45);
+  background: rgba(var(--jarvis-accent-rgb, 0, 188, 212), 0.45);
 }
 
 @keyframes jarvis-spin-slow {

@@ -1,36 +1,56 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import { AlertTriangle, BookOpen, Check, Copy, Lock, X } from 'lucide-react';
+import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import KineticGrid from './components/ui/kinetic-grid';
+import { ActiveTasksTray } from './components/ActiveTasksTray';
+import { ChatPasscodeActionCard } from './components/ChatPasscodeActionCard';
 import { HeaderBar } from './components/HeaderBar';
+import { HistoryPage } from './components/HistoryPage';
 import { JarvisOrb } from './components/JarvisOrb';
 import { PCApprovalCard } from './components/PCApprovalCard';
 import { PCControlPage } from './components/PCControlPage';
+import { PCGuidePage } from './components/PCGuidePage';
+import { ResearchBriefCard } from './components/ResearchBriefCard';
 import { RevealText } from './components/RevealText';
 import { TranscriptDrawer } from './components/TranscriptDrawer';
 import { VoiceControls } from './components/VoiceControls';
+import { isJarvisColorTheme, JARVIS_THEMES } from './lib/jarvisThemes';
 import type {
+  ActiveTask,
+  AppLock,
   AppView,
   AssistantState,
   ChatMessage,
+  JarvisColorTheme,
+  PCAction,
   PCCommand,
+  PCPublicStatus,
   PCSettings,
+  PendingChatAction,
   ProviderInfo,
   ProviderPreference,
+  ResearchJob,
+  ResearchSource,
 } from './types/jarvis';
 import {
+  getJarvisSpeechConfig,
   getSpeechRecognitionConstructor,
   isSpeechSynthesisSupported,
+  listJarvisVoiceOptions,
   prepareTextForSpeech,
-  selectNaturalVoice,
+  selectJarvisVoice,
   splitIntoSpeechChunks,
   type SpeechRecognitionInstance,
 } from './utils/speech';
 
 const QUICK_PROMPTS = [
   {
-    label: 'Draft an email',
-    prompt:
-      'Help me draft a concise, friendly follow-up email after a client project kickoff.',
+    label: 'Research a topic',
+    prompt: 'Research solid-state EV batteries and summarize the latest breakthroughs.',
+  },
+  {
+    label: 'Multitask on PC',
+    prompt: 'Open Chrome and research how WebGPU improves browser AI.',
   },
   {
     label: 'Plan my day',
@@ -38,15 +58,17 @@ const QUICK_PROMPTS = [
       'Ask me for my top three priorities today and build a realistic time-blocked plan.',
   },
   {
-    label: 'Brainstorm ideas',
+    label: 'Draft an email',
     prompt:
-      'Let us brainstorm three practical ways to cut down unnecessary weekly status meetings.',
+      'Help me draft a concise, friendly follow-up email after a client project kickoff.',
   },
-  {
-    label: 'Debug an issue',
-    prompt:
-      'Walk me through a crisp checklist for tracking down slow Node.js API endpoints.',
-  },
+];
+
+const THINKING_PHRASES = [
+  'Give me just a second…',
+  'Working through that now…',
+  'Pulling my thoughts together…',
+  'On it—one moment…',
 ];
 
 function createId(): string {
@@ -57,19 +79,19 @@ function getTimeAwareGreeting(): { headline: string; subline: string } {
   const hour = new Date().getHours();
   if (hour < 12) {
     return {
-      headline: 'Good morning. What are we tackling today?',
-      subline: 'Tap Talk to Jarvis, hold Spacebar, or enable Hey Jarvis in the header.',
+      headline: 'Good morning. What should we tackle first?',
+      subline: 'Speak naturally, hold Spacebar to talk, or type whatever is on your plate.',
     };
   }
   if (hour < 18) {
     return {
       headline: 'Good afternoon. Ready whenever you are.',
-      subline: 'Speak naturally for emails, planning, code help, or PC commands.',
+      subline: 'Ask for help with emails, planning, code, or a quick PC command.',
     };
   }
   return {
-    headline: 'Good evening. What is on your mind tonight?',
-    subline: 'Tap Talk to Jarvis or hold Spacebar for quick voice interaction.',
+    headline: 'Good evening. What are we wrapping up tonight?',
+    subline: 'Tap Talk to Jarvis, hold Spacebar, or type below to pick up right away.',
   };
 }
 
@@ -83,15 +105,42 @@ function stripWakeWord(transcript: string): { matched: boolean; stripped: string
 
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>('assistant');
+  const [colorTheme, setColorTheme] = useState<JarvisColorTheme>(() => {
+    try {
+      const saved = window.localStorage.getItem('jarvis_color_theme');
+      if (isJarvisColorTheme(saved)) return saved;
+    } catch {
+      // Ignore storage access errors
+    }
+    return 'blue';
+  });
   const [assistantState, setAssistantState] = useState<AssistantState>('idle');
   const [continuousMode, setContinuousMode] = useState(false);
   const [wakeWordMode, setWakeWordMode] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem('jarvis_voice_uri') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ProviderPreference>('auto');
+
+  useEffect(() => {
+    const spec = JARVIS_THEMES[colorTheme];
+    document.documentElement.style.setProperty('--jarvis-accent-rgb', spec.accentRgb);
+    try {
+      window.localStorage.setItem('jarvis_color_theme', colorTheme);
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [colorTheme]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [liveFinalText, setLiveFinalText] = useState('');
@@ -101,12 +150,29 @@ export default function App() {
 
   // Admin & PC Control State (Bearer token held strictly in memory)
   const [adminToken, setAdminToken] = useState<string | null>(null);
-  const [adminClaimed, setAdminClaimed] = useState(false);
-  const [envPasscodeConfigured, setEnvPasscodeConfigured] = useState(false);
   const [pcSettings, setPcSettings] = useState<PCSettings | null>(null);
   const [pcCommands, setPcCommands] = useState<PCCommand[]>([]);
-  const [agentOnline, setAgentOnline] = useState(false);
+  const [pcLocks, setPcLocks] = useState<AppLock[]>([]);
+  const [publicStatus, setPublicStatus] = useState<PCPublicStatus>({
+    pc_control_enabled: true,
+    kill_switch: false,
+    agentOnline: false,
+    agent_last_seen: null,
+    allowedAppsCount: 7,
+    activeLocks: [],
+  });
+  const [guideBannerDismissed, setGuideBannerDismissed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('jarvis_guide_banner_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [lockClock, setLockClock] = useState(Date.now());
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
+  const [researchJobs, setResearchJobs] = useState<Record<string, ResearchJob>>({});
+  const [taskClock, setTaskClock] = useState(Date.now());
 
   const speechRecognitionSupported = Boolean(getSpeechRecognitionConstructor());
   const greeting = getTimeAwareGreeting();
@@ -132,9 +198,19 @@ export default function App() {
   const interimBufferRef = useRef('');
   const silenceTimerRef = useRef<number | null>(null);
   const pttStopTimeoutRef = useRef<number | null>(null);
-  const submittingRef = useRef(false);
+  const activeDispatchCountRef = useRef(0);
   const speechSessionRef = useRef(0);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const selectedVoiceURIRef = useRef(selectedVoiceURI);
+
+  useEffect(() => {
+    selectedVoiceURIRef.current = selectedVoiceURI;
+    try {
+      window.localStorage.setItem('jarvis_voice_uri', selectedVoiceURI);
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [selectedVoiceURI]);
 
   // Mic analyser refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -178,7 +254,10 @@ export default function App() {
     pcCommandsRef.current = pcCommands;
   }, [pcCommands]);
 
-  // Fetch providers & admin status on mount
+  const announcedCommandResultsRef = useRef<Set<string>>(new Set());
+  const finishedResearchIdsRef = useRef<Set<string>>(new Set());
+
+  // Fetch providers on mount
   useEffect(() => {
     fetch('/api/providers')
       .then((res) => res.json())
@@ -186,23 +265,15 @@ export default function App() {
         if (Array.isArray(data.providers)) setProviders(data.providers);
       })
       .catch(() => {});
-
-    fetch('/api/admin/status')
-      .then((res) => res.json())
-      .then(
-        (data: { adminClaimed?: boolean; envPasscodeConfigured?: boolean }) => {
-          setAdminClaimed(Boolean(data.adminClaimed));
-          setEnvPasscodeConfigured(Boolean(data.envPasscodeConfigured));
-        }
-      )
-      .catch(() => {});
   }, []);
 
   // Load voices for speechSynthesis
   useEffect(() => {
     if (!isSpeechSynthesisSupported()) return;
     const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices();
+      const loaded = window.speechSynthesis.getVoices();
+      voicesRef.current = loaded;
+      setAvailableVoices(loaded);
     };
     loadVoices();
     window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
@@ -210,6 +281,17 @@ export default function App() {
       window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
       window.speechSynthesis.cancel();
     };
+  }, []);
+
+  const fetchPublicStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/pc/public-status');
+      if (!res.ok) return;
+      const data = (await res.json()) as PCPublicStatus;
+      setPublicStatus(data);
+    } catch {
+      // Ignore transient poll error
+    }
   }, []);
 
   const fetchPCState = useCallback(async () => {
@@ -223,17 +305,28 @@ export default function App() {
         setAdminToken(null);
         setPcSettings(null);
         setPcCommands([]);
+        setPcLocks([]);
         return;
       }
       if (!res.ok) return;
       const data = (await res.json()) as {
         settings: PCSettings;
         commands: PCCommand[];
+        locks: AppLock[];
         agentOnline: boolean;
       };
       setPcSettings(data.settings);
       setPcCommands(data.commands);
-      setAgentOnline(data.agentOnline);
+      setPcLocks(data.locks || []);
+      setPublicStatus((prev) => ({
+        ...prev,
+        pc_control_enabled: data.settings.pc_control_enabled,
+        kill_switch: data.settings.kill_switch,
+        agentOnline: data.agentOnline,
+        agent_last_seen: data.settings.agent_last_seen,
+        allowedAppsCount: data.settings.allowed_apps.length,
+        activeLocks: (data.locks || []).filter((l) => l.status === 'active'),
+      }));
       setLastSyncedAt(Date.now());
     } catch {
       // Ignore transient poll error
@@ -241,16 +334,36 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetchPublicStatus();
+  }, [fetchPublicStatus]);
+
+  useEffect(() => {
     if (!adminToken) return;
     fetchPCState();
   }, [adminToken, fetchPCState]);
 
-  // Poll PC state automatically while on PC Control page or while commands are active
+  // 1-second tick when any active lock exists so live countdowns stay smooth
+  useEffect(() => {
+    if (publicStatus.activeLocks.length === 0) return;
+    const id = window.setInterval(() => setLockClock(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [publicStatus.activeLocks.length]);
+
   const hasActiveCommands = pcCommands.some(
     (c) =>
       c.status === 'pending_approval' || c.status === 'approved' || c.status === 'running'
   );
 
+  // Poll non-secret public status (badge, active locks, guide checklist)
+  useEffect(() => {
+    const intervalMs = hasActiveCommands || activeView === 'guide' ? 2000 : 4000;
+    const id = window.setInterval(() => {
+      fetchPublicStatus();
+    }, intervalMs);
+    return () => window.clearInterval(id);
+  }, [activeView, hasActiveCommands, fetchPublicStatus]);
+
+  // Poll admin PC state while on PC Control page or while commands are active
   useEffect(() => {
     if (!adminToken) return;
     if (activeView !== 'pc-control' && !hasActiveCommands) return;
@@ -260,6 +373,47 @@ export default function App() {
     }, intervalMs);
     return () => window.clearInterval(id);
   }, [adminToken, activeView, hasActiveCommands, fetchPCState]);
+
+  // Listen for Change Passcode event from PCControlPage
+  useEffect(() => {
+    const handler = async (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{
+          currentPasscode: string;
+          newPasscode: string;
+          resolve: (res: { ok: boolean; text: string }) => void;
+        }>
+      ).detail;
+      const token = adminTokenRef.current;
+      if (!token) {
+        detail.resolve({ ok: false, text: 'Admin session expired.' });
+        return;
+      }
+      try {
+        const res = await fetch('/api/admin/change-passcode', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            currentPasscode: detail.currentPasscode,
+            newPasscode: detail.newPasscode,
+          }),
+        });
+        const data = (await res.json()) as { ok?: boolean; message?: string; error?: string };
+        if (!res.ok || !data.ok) {
+          detail.resolve({ ok: false, text: data.error || 'Unable to change passcode.' });
+        } else {
+          detail.resolve({ ok: true, text: data.message || 'Admin passcode updated.' });
+        }
+      } catch {
+        detail.resolve({ ok: false, text: 'Network error while updating passcode.' });
+      }
+    };
+    window.addEventListener('jarvis-change-passcode', handler);
+    return () => window.removeEventListener('jarvis-change-passcode', handler);
+  }, []);
 
   const stopMicMonitor = useCallback(() => {
     if (micRafRef.current !== null) {
@@ -402,68 +556,100 @@ export default function App() {
     window.speechSynthesis.cancel();
     setAssistantState('speaking');
 
-    const voices =
-      voicesRef.current.length > 0 ? voicesRef.current : window.speechSynthesis.getVoices();
-    const preferredVoice = selectNaturalVoice(voices);
-
-    let index = 0;
-    const speakNext = () => {
+    const startSpeakingWithVoices = (voices: SpeechSynthesisVoice[]) => {
       if (speechSessionRef.current !== sessionId) return;
-      if (index >= chunks.length) {
-        speechPulseRef.current = 0;
-        resumeIfNeeded();
-        return;
-      }
+      const preferredVoice = selectJarvisVoice(voices, selectedVoiceURIRef.current);
+      const speechCfg = getJarvisSpeechConfig(preferredVoice);
 
-      const utterance = new SpeechSynthesisUtterance(chunks[index]);
-      if (preferredVoice) utterance.voice = preferredVoice;
-      utterance.rate = 1.03;
-      utterance.pitch = 1.0;
-
-      utterance.onboundary = () => {
-        if (speechSessionRef.current === sessionId) {
-          speechPulseRef.current = 0.95;
+      let index = 0;
+      const speakNext = () => {
+        if (speechSessionRef.current !== sessionId) return;
+        if (index >= chunks.length) {
+          speechPulseRef.current = 0;
+          resumeIfNeeded();
+          return;
         }
+
+        const utterance = new SpeechSynthesisUtterance(chunks[index]);
+        if (preferredVoice) utterance.voice = preferredVoice;
+        utterance.lang = speechCfg.lang;
+        utterance.rate = speechCfg.rate;
+        utterance.pitch = speechCfg.pitch;
+
+        utterance.onboundary = () => {
+          if (speechSessionRef.current === sessionId) {
+            speechPulseRef.current = 0.95;
+          }
+        };
+
+        utterance.onend = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          index += 1;
+          speakNext();
+        };
+
+        utterance.onerror = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          speechPulseRef.current = 0;
+          resumeIfNeeded();
+        };
+
+        speechPulseRef.current = 0.72;
+        window.speechSynthesis.speak(utterance);
       };
 
-      utterance.onend = () => {
-        if (speechSessionRef.current !== sessionId) return;
-        index += 1;
-        speakNext();
-      };
-
-      utterance.onerror = () => {
-        if (speechSessionRef.current !== sessionId) return;
-        speechPulseRef.current = 0;
-        resumeIfNeeded();
-      };
-
-      speechPulseRef.current = 0.72;
-      window.speechSynthesis.speak(utterance);
+      speakNext();
     };
 
-    speakNext();
+    const freshVoices = window.speechSynthesis.getVoices();
+    const initialVoices = freshVoices.length > 0 ? freshVoices : voicesRef.current;
+    if (initialVoices.length > 0) {
+      voicesRef.current = initialVoices;
+      startSpeakingWithVoices(initialVoices);
+      return;
+    }
+
+    // Chrome can populate remote voices (e.g. Google UK English Male) shortly after first call
+    let started = false;
+    const finishWait = () => {
+      if (started) return;
+      started = true;
+      window.speechSynthesis.removeEventListener('voiceschanged', onReady);
+      const loaded = window.speechSynthesis.getVoices();
+      if (loaded.length > 0) {
+        voicesRef.current = loaded;
+        setAvailableVoices(loaded);
+      }
+      startSpeakingWithVoices(loaded.length > 0 ? loaded : voicesRef.current);
+    };
+    const onReady = () => {
+      if (window.speechSynthesis.getVoices().length > 0) {
+        finishWait();
+      }
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', onReady);
+    window.setTimeout(finishWait, 350);
   }, []);
 
   const handleDecideCommand = useCallback(
     async (
       id: string,
       decision: 'approve' | 'deny',
-      opts?: { pin?: string; alwaysAllowApp?: boolean; viaVoice?: boolean }
+      opts?: { passcode?: string; alwaysAllowApp?: boolean; viaVoice?: boolean }
     ): Promise<string | null> => {
       const token = adminTokenRef.current;
-      if (!token) return 'Admin authentication required.';
+      if (!token && !opts?.passcode) return 'Admin passcode is required.';
 
       try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+
         const res = await fetch(`/api/pc/commands/${encodeURIComponent(id)}/decide`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
+          headers,
           body: JSON.stringify({
             decision,
-            pin: opts?.pin,
+            passcode: opts?.passcode,
             alwaysAllowApp: opts?.alwaysAllowApp,
             viaVoice: opts?.viaVoice,
           }),
@@ -480,18 +666,322 @@ export default function App() {
             : [data.command!, ...prev];
         });
         fetchPCState();
+        fetchPublicStatus();
         return null;
       } catch {
         return 'Network error while sending decision.';
       }
     },
-    [fetchPCState]
+    [fetchPCState, fetchPublicStatus]
   );
+
+  const handleUnlockApp = useCallback(
+    async (lockId: string, passcode: string): Promise<string | null> => {
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (adminTokenRef.current) headers.Authorization = `Bearer ${adminTokenRef.current}`;
+
+        const res = await fetch(`/api/pc/locks/${encodeURIComponent(lockId)}/unlock`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ passcode }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          activeLocks?: AppLock[];
+          error?: string;
+        };
+        if (!res.ok || !data.ok) {
+          return data.error || 'Unable to unlock app.';
+        }
+        if (Array.isArray(data.activeLocks)) {
+          setPublicStatus((prev) => ({ ...prev, activeLocks: data.activeLocks! }));
+        }
+        fetchPCState();
+        fetchPublicStatus();
+        return null;
+      } catch {
+        return 'Network error while unlocking app.';
+      }
+    },
+    [fetchPCState, fetchPublicStatus]
+  );
+
+  const handleConfirmChatAction = useCallback(
+    async (
+      messageId: string,
+      action: PendingChatAction,
+      passcode: string
+    ): Promise<string | null> => {
+      if (action.type === 'unlock_app') {
+        if (!action.lockId) return 'Lock ID missing.';
+        const err = await handleUnlockApp(action.lockId, passcode);
+        if (err) return err;
+        const doneText = `${action.appName} is now unlocked.`;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.pendingAction
+              ? { ...m, pendingAction: { ...m.pendingAction, resolved: true, statusText: doneText } }
+              : m
+          )
+        );
+        return null;
+      }
+
+      try {
+        const res = await fetch('/api/pc/permissions/chat-confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            passcode,
+            action: action.type,
+            appName: action.appName,
+            aliases: action.aliases,
+            launchCommand: action.launchCommand,
+            processName: action.processName,
+          }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          message?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.ok) {
+          return data.error || 'Passcode check failed.';
+        }
+        const statusText = data.message || 'Updated permitted apps.';
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.pendingAction
+              ? {
+                  ...m,
+                  pendingAction: {
+                    ...m.pendingAction,
+                    resolved: true,
+                    statusText,
+                  },
+                }
+              : m
+          )
+        );
+        fetchPCState();
+        fetchPublicStatus();
+        return null;
+      } catch {
+        return 'Network error while confirming permission.';
+      }
+    },
+    [fetchPCState, fetchPublicStatus, handleUnlockApp]
+  );
+
+  const hasRunningTasks = activeTasks.some((t) => t.status === 'running');
+  useEffect(() => {
+    if (!hasRunningTasks) return;
+    const id = window.setInterval(() => setTaskClock(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [hasRunningTasks]);
+
+  const handleDismissTask = useCallback((taskId: string) => {
+    setActiveTasks((prev) => prev.filter((t) => t.id !== taskId));
+  }, []);
+
+  // Poll active autonomous research jobs concurrently
+  const runningResearchIds = Object.values(researchJobs)
+    .filter(
+      (j) =>
+        j.status === 'queued' ||
+        j.status === 'planning' ||
+        j.status === 'searching' ||
+        j.status === 'reading' ||
+        j.status === 'synthesizing'
+    )
+    .map((j) => j.id);
+
+  useEffect(() => {
+    if (runningResearchIds.length === 0) return;
+
+    const pollResearch = async () => {
+      await Promise.all(
+        runningResearchIds.map(async (jobId) => {
+          try {
+            const res = await fetch(`/api/research/${encodeURIComponent(jobId)}`);
+            if (!res.ok) return;
+            const data = (await res.json()) as { job?: ResearchJob };
+            const job = data.job;
+            if (!job) return;
+
+            setResearchJobs((prev) => ({ ...prev, [job.id]: job }));
+
+            setActiveTasks((prev) =>
+              prev.map((t) =>
+                t.researchJobId === job.id
+                  ? {
+                      ...t,
+                      detail: job.stepLabel,
+                      status:
+                        job.status === 'done'
+                          ? 'done'
+                          : job.status === 'failed'
+                          ? 'failed'
+                          : 'running',
+                    }
+                  : t
+              )
+            );
+
+            if (job.status === 'done' && !finishedResearchIdsRef.current.has(job.id)) {
+              finishedResearchIdsRef.current.add(job.id);
+              const reportText = job.report || `Finished researching "${job.query}".`;
+              const currentMsgs = messagesRef.current;
+              const starterIdx = currentMsgs.findIndex((m) => m.researchJobId === job.id);
+              const hasNewerMessages =
+                starterIdx !== -1 && starterIdx < currentMsgs.length - 1;
+
+              if (starterIdx !== -1 && !hasNewerMessages) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.researchJobId === job.id
+                      ? {
+                          ...m,
+                          content: reportText,
+                          sources: job.sources,
+                          providerName: job.providerName || m.providerName,
+                          modelUsed: job.modelUsed || m.modelUsed,
+                        }
+                      : m
+                  )
+                );
+              } else {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: createId(),
+                    role: 'assistant',
+                    content: reportText,
+                    timestamp: Date.now(),
+                    providerName: job.providerName,
+                    modelUsed: job.modelUsed,
+                    researchJobId: job.id,
+                    sources: job.sources,
+                  },
+                ]);
+              }
+
+              if (assistantStateRef.current === 'idle') {
+                speakResponse(
+                  job.spokenSummary || reportText,
+                  continuousModeRef.current || wakeWordModeRef.current
+                );
+              }
+            } else if (job.status === 'failed' && !finishedResearchIdsRef.current.has(job.id)) {
+              finishedResearchIdsRef.current.add(job.id);
+              const failText = `I couldn't finish researching "${job.query}": ${
+                job.error || 'please try again.'
+              }`;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createId(),
+                  role: 'assistant',
+                  content: failText,
+                  timestamp: Date.now(),
+                  researchJobId: job.id,
+                },
+              ]);
+            }
+          } catch {
+            // Ignore transient research poll glitch
+          }
+        })
+      );
+    };
+
+    const id = window.setInterval(pollResearch, 1200);
+    return () => window.clearInterval(id);
+  }, [runningResearchIds.join(','), speakResponse]);
+
+  // Watch active PC commands (for both admin and non-admin chat sessions) so /api/agent/report results show in chat
+  useEffect(() => {
+    const activeIds = pcCommands
+      .filter((c) => c.status === 'pending_approval' || c.status === 'approved' || c.status === 'running')
+      .map((c) => c.id);
+
+    // Sync activeTasks status for PC tasks
+    setActiveTasks((prev) => {
+      let changed = false;
+      const next = prev.map((t) => {
+        if (t.kind !== 'pc' || t.status !== 'running' || !t.pcCommandIds?.length) return t;
+        const tracked = t.pcCommandIds
+          .map((cid) => pcCommands.find((c) => c.id === cid))
+          .filter((c): c is PCCommand => Boolean(c));
+        if (tracked.length === 0) return t;
+        const anyPending = tracked.some(
+          (c) => c.status === 'pending_approval' || c.status === 'approved' || c.status === 'running'
+        );
+        if (anyPending) return t;
+        changed = true;
+        const anyBad = tracked.some(
+          (c) => c.status === 'failed' || c.status === 'denied' || c.status === 'expired'
+        );
+        return {
+          ...t,
+          status: anyBad ? ('failed' as const) : ('done' as const),
+          detail: tracked[0].result_message || (anyBad ? 'Action did not complete' : 'Completed on PC'),
+        };
+      });
+      return changed ? next : prev;
+    });
+
+    if (activeIds.length === 0) return;
+
+    const id = window.setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/api/pc/commands/status?ids=${encodeURIComponent(activeIds.join(','))}`
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { commands?: PCCommand[] };
+        if (!Array.isArray(data.commands)) return;
+
+        const updatesById = new Map(data.commands.map((c) => [c.id, c]));
+        setPcCommands((prev) => prev.map((c) => updatesById.get(c.id) || c));
+
+        for (const updated of data.commands) {
+          if (
+            (updated.status === 'done' || updated.status === 'failed') &&
+            !announcedCommandResultsRef.current.has(updated.id)
+          ) {
+            announcedCommandResultsRef.current.add(updated.id);
+            const reportLine =
+              updated.status === 'done'
+                ? updated.result_message || `Finished ${updated.action.replace('_', ' ')}.`
+                : `PC Agent couldn't run that: ${updated.result_message || 'Command failed.'}`;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: createId(),
+                role: 'assistant',
+                content: reportLine,
+                timestamp: Date.now(),
+              },
+            ]);
+            if (assistantStateRef.current === 'idle') {
+              speakResponse(reportLine, continuousModeRef.current || wakeWordModeRef.current);
+            }
+          }
+        }
+      } catch {
+        // Ignore transient status poll failure
+      }
+    }, 1500);
+
+    return () => window.clearInterval(id);
+  }, [pcCommands, speakResponse]);
 
   const submitPrompt = useCallback(
     async (text: string, inputSource: 'voice' | 'typed' | 'pasted') => {
       const cleaned = text.trim();
-      if (!cleaned || submittingRef.current) return;
+      if (!cleaned) return;
 
       // Support voice approval ("approve" / "deny") for low and medium risk pending commands
       if (inputSource === 'voice' && adminTokenRef.current) {
@@ -531,11 +1021,30 @@ export default function App() {
         }
       }
 
-      submittingRef.current = true;
+      const isConcurrentDispatch = activeDispatchCountRef.current > 0;
+      activeDispatchCountRef.current += 1;
+      const dispatchTaskId = createId();
+
+      if (isConcurrentDispatch) {
+        setActiveTasks((prev) => [
+          {
+            id: dispatchTaskId,
+            kind: 'chat',
+            title: cleaned.length > 38 ? `${cleaned.slice(0, 36)}…` : cleaned,
+            detail: 'Working in parallel…',
+            status: 'running',
+            startedAt: Date.now(),
+          },
+          ...prev,
+        ]);
+      }
+
       setErrorMessage(null);
       setLiveFinalText('');
       setLiveInterimText('');
-      setAssistantState('thinking');
+      if (activeDispatchCountRef.current === 1 && assistantStateRef.current !== 'speaking') {
+        setAssistantState('thinking');
+      }
 
       const userMessage: ChatMessage = {
         id: createId(),
@@ -559,6 +1068,7 @@ export default function App() {
           body: JSON.stringify({
             provider: selectedProviderRef.current,
             inputSource,
+            clientTzOffsetMinutes: new Date().getTimezoneOffset(),
             messages: updatedHistory.slice(-24).map((m) => ({
               role: m.role,
               content: m.content,
@@ -567,11 +1077,16 @@ export default function App() {
         });
 
         const data = (await res.json()) as {
-          type?: 'chat' | 'pc_command';
+          type?: 'chat' | 'pc_command' | 'chat_passcode_action' | 'research_started';
           reply?: string;
           command?: PCCommand;
+          commands?: PCCommand[];
+          pendingAction?: PendingChatAction;
+          researchJob?: ResearchJob;
+          activeLocks?: AppLock[];
           providerName?: string;
           modelUsed?: string;
+          sources?: ResearchSource[];
           error?: string;
         };
 
@@ -579,8 +1094,74 @@ export default function App() {
           throw new Error(data.error || 'Unable to reach AI provider.');
         }
 
-        if (data.type === 'pc_command' && data.command) {
-          setPcCommands((prev) => [data.command!, ...prev]);
+        const returnedCommands =
+          Array.isArray(data.commands) && data.commands.length > 0
+            ? data.commands
+            : data.command
+            ? [data.command]
+            : [];
+
+        if (returnedCommands.length > 0) {
+          for (const cmd of returnedCommands) {
+            if (cmd.status === 'done' || cmd.status === 'denied') {
+              announcedCommandResultsRef.current.add(cmd.id);
+            }
+          }
+          setPcCommands((prev) => [...returnedCommands, ...prev]);
+        }
+
+        if (Array.isArray(data.activeLocks)) {
+          setPublicStatus((prev) => ({ ...prev, activeLocks: data.activeLocks! }));
+        }
+
+        // Clean up temporary concurrent chat indicator, and register persistent research / PC tasks
+        if (isConcurrentDispatch) {
+          setActiveTasks((prev) => prev.filter((t) => t.id !== dispatchTaskId));
+        }
+
+        if (data.researchJob) {
+          const job = data.researchJob;
+          setResearchJobs((prev) => ({ ...prev, [job.id]: job }));
+          setActiveTasks((prev) => [
+            {
+              id: `research-${job.id}`,
+              kind: 'research',
+              title: job.query.length > 38 ? `${job.query.slice(0, 36)}…` : job.query,
+              detail: job.stepLabel,
+              status: 'running',
+              startedAt: Date.now(),
+              researchJobId: job.id,
+            },
+            ...prev,
+          ]);
+        }
+
+        const activePcCmds = returnedCommands.filter(
+          (c) => c.status === 'pending_approval' || c.status === 'approved' || c.status === 'running'
+        );
+        if (activePcCmds.length > 0) {
+          setActiveTasks((prev) => [
+            {
+              id: `pc-${activePcCmds[0].id}`,
+              kind: 'pc',
+              title:
+                activePcCmds.length > 1
+                  ? `${activePcCmds.length} PC actions`
+                  : activePcCmds[0].command_text.length > 38
+                  ? `${activePcCmds[0].command_text.slice(0, 36)}…`
+                  : activePcCmds[0].command_text,
+              detail:
+                activePcCmds[0].status === 'pending_approval'
+                  ? 'Waiting for approval'
+                  : publicStatus.agentOnline
+                  ? 'Sending to PC Agent'
+                  : 'Queued for PC Agent',
+              status: 'running',
+              startedAt: Date.now(),
+              pcCommandIds: activePcCmds.map((c) => c.id),
+            },
+            ...prev,
+          ]);
         }
 
         const assistantMessage: ChatMessage = {
@@ -590,27 +1171,36 @@ export default function App() {
           timestamp: Date.now(),
           providerName: data.providerName,
           modelUsed: data.modelUsed,
-          pcCommandId: data.command?.id,
+          pcCommandId: returnedCommands[0]?.id,
+          pcCommandIds: returnedCommands.map((c) => c.id),
+          pendingAction: data.pendingAction,
+          researchJobId: data.researchJob?.id,
+          sources: data.sources,
         };
 
         setMessages((prev) => [...prev, assistantMessage]);
-        submittingRef.current = false;
+        activeDispatchCountRef.current = Math.max(0, activeDispatchCountRef.current - 1);
 
         speakResponse(
           data.reply,
           continuousModeRef.current || wakeWordModeRef.current
         );
       } catch (err) {
-        submittingRef.current = false;
+        activeDispatchCountRef.current = Math.max(0, activeDispatchCountRef.current - 1);
+        if (isConcurrentDispatch) {
+          setActiveTasks((prev) => prev.filter((t) => t.id !== dispatchTaskId));
+        }
         const msg = err instanceof Error ? err.message : 'Something went wrong.';
         setErrorMessage(msg);
-        setContinuousMode(false);
-        setWakeWordMode(false);
-        stopMicMonitor();
-        setAssistantState('idle');
+        if (activeDispatchCountRef.current === 0) {
+          setContinuousMode(false);
+          setWakeWordMode(false);
+          stopMicMonitor();
+          setAssistantState('idle');
+        }
       }
     },
-    [handleDecideCommand, speakResponse, stopMicMonitor]
+    [handleDecideCommand, publicStatus.agentOnline, speakResponse, stopMicMonitor]
   );
 
   const startListeningSession = useCallback(() => {
@@ -827,8 +1417,6 @@ export default function App() {
   }, [cancelSpeech, stopMicMonitor, stopRecognitionOnly]);
 
   const handleToggleTalk = useCallback(() => {
-    if (assistantStateRef.current === 'thinking') return;
-
     if (assistantStateRef.current === 'speaking') {
       cancelSpeech();
       setContinuousMode(true);
@@ -884,7 +1472,7 @@ export default function App() {
   }, [startListeningSession, stopMicMonitor, stopRecognitionOnly]);
 
   const handlePushToTalkStart = useCallback(() => {
-    if (assistantStateRef.current === 'thinking' || pushToTalkActiveRef.current) return;
+    if (pushToTalkActiveRef.current) return;
     setContinuousMode(false);
     continuousModeRef.current = false;
     setPushToTalkActive(true);
@@ -940,7 +1528,7 @@ export default function App() {
       if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (activeView !== 'assistant') return;
       if (isTypingTarget(e.target)) return;
-      if (!speechRecognitionSupported || assistantStateRef.current === 'thinking') return;
+      if (!speechRecognitionSupported) return;
       e.preventDefault();
       handlePushToTalkStart();
     };
@@ -973,7 +1561,7 @@ export default function App() {
   const handleOrbClick = useCallback(() => {
     if (assistantStateRef.current === 'speaking') {
       handleStopSpeaking();
-    } else if (assistantStateRef.current !== 'thinking') {
+    } else {
       handleToggleTalk();
     }
   }, [handleStopSpeaking, handleToggleTalk]);
@@ -997,6 +1585,9 @@ export default function App() {
     setWakeWordMode(false);
     setPushToTalkActive(false);
     setMessages([]);
+    setActiveTasks([]);
+    setResearchJobs({});
+    finishedResearchIdsRef.current.clear();
     setLiveFinalText('');
     setLiveInterimText('');
     setErrorMessage(null);
@@ -1038,13 +1629,26 @@ export default function App() {
         const data = (await res.json()) as {
           settings?: PCSettings;
           agentOnline?: boolean;
+          locks?: AppLock[];
           error?: string;
         };
         if (!res.ok || !data.settings) {
           return data.error || 'Unable to update settings.';
         }
         setPcSettings(data.settings);
-        if (typeof data.agentOnline === 'boolean') setAgentOnline(data.agentOnline);
+        if (Array.isArray(data.locks)) {
+          setPcLocks(data.locks);
+        }
+        setPublicStatus((prev) => ({
+          ...prev,
+          pc_control_enabled: data.settings!.pc_control_enabled,
+          kill_switch: data.settings!.kill_switch,
+          agentOnline: typeof data.agentOnline === 'boolean' ? data.agentOnline : prev.agentOnline,
+          allowedAppsCount: data.settings!.allowed_apps.length,
+          activeLocks: Array.isArray(data.locks)
+            ? data.locks.filter((l) => l.status === 'active')
+            : prev.activeLocks,
+        }));
         if (patch.kill_switch === true) {
           fetchPCState();
         }
@@ -1084,8 +1688,62 @@ export default function App() {
     }
     setAdminToken(null);
     setPcSettings(null);
-    setPcCommands([]);
+    setPcLocks([]);
   }, []);
+
+  const handleQuickAction = useCallback(
+    async (
+      action: PCAction,
+      params: Record<string, unknown>
+    ): Promise<{ ok: boolean; error?: string; message?: string }> => {
+      const token = adminTokenRef.current;
+      if (!token) return { ok: false, error: 'Admin sign-in is required.' };
+      try {
+        const res = await fetch('/api/pc/quick-action', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ action, params }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          command?: PCCommand;
+          activeLocks?: AppLock[];
+          locks?: AppLock[];
+          error?: string;
+        };
+        if (!res.ok || !data.ok) {
+          return { ok: false, error: data.error || 'Could not queue quick action.' };
+        }
+        if (data.command) {
+          setPcCommands((prev) => [data.command!, ...prev]);
+        }
+        if (Array.isArray(data.locks)) {
+          setPcLocks(data.locks);
+        }
+        if (Array.isArray(data.activeLocks)) {
+          setPublicStatus((prev) => ({ ...prev, activeLocks: data.activeLocks! }));
+        }
+        fetchPCState();
+        fetchPublicStatus();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while sending action.' };
+      }
+    },
+    [fetchPCState, fetchPublicStatus]
+  );
+
+  const handleDismissGuideBanner = () => {
+    setGuideBannerDismissed(true);
+    try {
+      window.localStorage.setItem('jarvis_guide_banner_dismissed', '1');
+    } catch {
+      // Ignore storage error
+    }
+  };
 
   const commandsById: Record<string, PCCommand> = {};
   for (const cmd of pcCommands) {
@@ -1094,8 +1752,16 @@ export default function App() {
 
   const latestAssistantMsg = [...messages].reverse().find((m) => m.role === 'assistant');
   const latestUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-  const latestPcCmd = latestAssistantMsg?.pcCommandId
-    ? commandsById[latestAssistantMsg.pcCommandId]
+  const latestPcCmdIds = latestAssistantMsg?.pcCommandIds?.length
+    ? latestAssistantMsg.pcCommandIds
+    : latestAssistantMsg?.pcCommandId
+    ? [latestAssistantMsg.pcCommandId]
+    : [];
+  const latestPcCmds = latestPcCmdIds
+    .map((id) => commandsById[id])
+    .filter((c): c is PCCommand => Boolean(c));
+  const latestResearchJob = latestAssistantMsg?.researchJobId
+    ? researchJobs[latestAssistantMsg.researchJobId]
     : undefined;
 
   const handleCopyLatest = async () => {
@@ -1112,7 +1778,7 @@ export default function App() {
   const stateTitle =
     assistantState === 'listening'
       ? pushToTalkActive
-        ? 'Listening (Push-to-Talk)'
+        ? 'Listening (push-to-talk)'
         : wakeWordMode && !continuousMode
         ? 'Listening for “Hey Jarvis”'
         : 'Listening'
@@ -1120,236 +1786,437 @@ export default function App() {
       ? 'Thinking'
       : assistantState === 'speaking'
       ? 'Speaking'
-      : 'Standing By';
+      : 'Standing by';
 
   const hasTranscriptText = Boolean(liveFinalText || liveInterimText);
+  const thinkingLine = THINKING_PHRASES[messages.length % THINKING_PHRASES.length];
+  const stageKey =
+    assistantState === 'listening'
+      ? 'listening'
+      : assistantState === 'thinking'
+      ? 'thinking'
+      : latestAssistantMsg
+      ? `reply-${latestAssistantMsg.id}`
+      : 'welcome';
+
+  const voiceOptions = listJarvisVoiceOptions(availableVoices);
+  const resolvedVoice = selectJarvisVoice(availableVoices, selectedVoiceURI);
+  const activeVoiceLabel = getJarvisSpeechConfig(resolvedVoice).profileLabel;
+
+  const handleTestVoice = useCallback(() => {
+    setVoiceEnabled(true);
+    voiceEnabledRef.current = true;
+    speakResponse('At your service. All systems are online and standing by.', false);
+  }, [speakResponse]);
+
+  const ui = JARVIS_THEMES[colorTheme].ui;
 
   return (
-    <KineticGrid globalColor="default" className="flex flex-col h-[100dvh]">
-      <div className="flex h-[100dvh] w-full flex-col overflow-hidden">
-        <HeaderBar
-          activeView={activeView}
-          onChangeView={setActiveView}
-          providers={providers}
-          selectedProvider={selectedProvider}
-          onSelectProvider={setSelectedProvider}
-          wakeWordEnabled={wakeWordMode}
-          wakeWordSupported={speechRecognitionSupported}
-          onToggleWakeWord={handleToggleWakeWord}
-          voiceEnabled={voiceEnabled}
-          onToggleVoice={handleToggleVoice}
-          historyOpen={historyOpen}
-          onToggleHistory={() => setHistoryOpen((prev) => !prev)}
-          messageCount={messages.length}
-          onClearConversation={handleClearConversation}
-          agentOnline={agentOnline}
-          isAdmin={Boolean(adminToken)}
-        />
-
-        {activeView === 'pc-control' ? (
-          <PCControlPage
-            isAdmin={Boolean(adminToken)}
-            adminClaimed={adminClaimed}
-            envPasscodeConfigured={envPasscodeConfigured}
-            onAdminAuthenticated={(token) => {
-              setAdminToken(token);
-              setAdminClaimed(true);
-            }}
-            onAdminLogout={handleAdminLogout}
-            settings={pcSettings}
-            commands={pcCommands}
-            agentOnline={agentOnline}
-            lastSyncedAt={lastSyncedAt}
-            onRefreshState={fetchPCState}
-            onUpdateSettings={handleUpdateSettings}
-            onRegenerateToken={handleRegenerateToken}
-            onDecideCommand={handleDecideCommand}
+    <MotionConfig reducedMotion="user">
+      <KineticGrid
+        globalColor="default"
+        colorTheme={colorTheme}
+        className="flex flex-col h-[100dvh]"
+      >
+        <div className="flex h-[100dvh] w-full flex-col overflow-hidden">
+          <HeaderBar
+            activeView={activeView}
+            onChangeView={setActiveView}
+            colorTheme={colorTheme}
+            onSelectColorTheme={setColorTheme}
+            providers={providers}
+            selectedProvider={selectedProvider}
+            onSelectProvider={setSelectedProvider}
+            wakeWordEnabled={wakeWordMode}
+            wakeWordSupported={speechRecognitionSupported}
+            onToggleWakeWord={handleToggleWakeWord}
+            voiceEnabled={voiceEnabled}
+            onToggleVoice={handleToggleVoice}
+            voiceOptions={voiceOptions}
+            selectedVoiceURI={selectedVoiceURI}
+            activeVoiceLabel={activeVoiceLabel}
+            onSelectVoiceURI={setSelectedVoiceURI}
+            onTestVoice={handleTestVoice}
+            historyOpen={historyOpen}
+            onToggleHistory={() => setHistoryOpen((prev) => !prev)}
+            messageCount={messages.length}
+            onClearConversation={handleClearConversation}
+            agentOnline={publicStatus.agentOnline}
           />
-        ) : (
-          <main className="relative z-10 flex flex-1 flex-col items-center justify-between overflow-y-auto px-4 pt-3 pb-2">
-            <div className="flex flex-1 flex-col items-center justify-center w-full max-w-3xl mx-auto py-1">
-              {/* Quiet State Label */}
-              <div className="mb-1 text-xs font-mono tracking-[0.2em] uppercase">
-                <span
-                  className={
-                    assistantState === 'listening'
-                      ? 'text-cyan-300'
-                      : assistantState === 'speaking'
-                      ? 'text-sky-300'
-                      : assistantState === 'thinking'
-                      ? 'text-blue-300'
-                      : 'text-slate-400'
-                  }
-                >
-                  {stateTitle}
-                </span>
-              </div>
 
-              {/* Three.js WebGL Plasma Sphere + Signature Voice Stage */}
-              <JarvisOrb
-                state={assistantState}
-                audioLevelRef={audioLevelRef}
-                speechPulseRef={speechPulseRef}
-                onOrbClick={handleOrbClick}
-              />
-
-              {/* Live Transcription & Response Stage */}
-              <div className="mt-3 w-full max-w-2xl px-1">
-                {errorMessage && (
-                  <div
-                    role="alert"
-                    className="mb-3 rounded-2xl border border-rose-500/35 bg-[#12080D]/92 px-4 py-3 text-sm text-rose-200 flex items-start justify-between gap-3"
-                  >
-                    <p className="leading-relaxed">{errorMessage}</p>
-                    <button
-                      type="button"
-                      onClick={() => setErrorMessage(null)}
-                      className="text-xs text-rose-300 hover:text-white shrink-0 cursor-pointer"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                )}
-
-                {assistantState === 'listening' ? (
-                  <div className="min-h-[78px] rounded-2xl border border-cyan-400/25 bg-[#050A14]/92 px-5 py-4 text-center">
-                    {hasTranscriptText ? (
-                      <p className="text-base sm:text-lg leading-relaxed text-white">
-                        <span>{liveFinalText}</span>
-                        {liveFinalText && liveInterimText ? ' ' : ''}
-                        <span className="text-cyan-300/85">{liveInterimText}</span>
-                      </p>
-                    ) : (
-                      <p className="text-sm sm:text-base text-slate-400">
-                        {wakeWordMode && !continuousMode && !pushToTalkActive
-                          ? 'Say “Hey Jarvis” followed by your request.'
-                          : 'Listening—go ahead when you are ready.'}
-                      </p>
-                    )}
-                  </div>
-                ) : assistantState === 'thinking' ? (
-                  <div className="min-h-[78px] rounded-2xl border border-sky-400/25 bg-[#050A14]/92 px-5 py-4 text-center">
-                    {latestUserMsg && (
-                      <p className="text-sm text-slate-400 line-clamp-2 mb-1">
-                        “{latestUserMsg.content}”
-                      </p>
-                    )}
-                    <p className="text-sm font-medium text-sky-200">
-                      Let me pull that together...
-                    </p>
-                  </div>
-                ) : latestAssistantMsg ? (
-                  <div className="rounded-2xl border border-white/[0.1] bg-[#060B16]/92 px-5 py-4">
-                    <div className="mb-2 flex items-center justify-between gap-3 text-xs text-slate-400">
-                      <div className="flex items-center gap-1.5 min-w-0 truncate">
-                        <span className="font-semibold text-cyan-300">JARVIS</span>
-                        {latestAssistantMsg.providerName && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span>{latestAssistantMsg.providerName}</span>
-                          </>
-                        )}
-                        {latestAssistantMsg.modelUsed && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span className="font-mono text-[11px] text-slate-500 truncate">
-                              {latestAssistantMsg.modelUsed}
-                            </span>
-                          </>
-                        )}
-                      </div>
-
+          <AnimatePresence mode="wait" initial={false}>
+            {activeView === 'pc-control' ? (
+              <motion.div
+                key="pc-control-view"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                className="flex flex-1 min-h-0 flex-col"
+              >
+                <PCControlPage
+                  isAdmin={Boolean(adminToken)}
+                  onAdminAuthenticated={(token) => {
+                    setAdminToken(token);
+                  }}
+                  onAdminLogout={handleAdminLogout}
+                  onNavigateView={setActiveView}
+                  settings={pcSettings}
+                  commands={pcCommands}
+                  locks={pcLocks}
+                  agentOnline={publicStatus.agentOnline}
+                  lastSyncedAt={lastSyncedAt}
+                  onRefreshState={fetchPCState}
+                  onUpdateSettings={handleUpdateSettings}
+                  onRegenerateToken={handleRegenerateToken}
+                  onDecideCommand={handleDecideCommand}
+                  onUnlockApp={handleUnlockApp}
+                  onQuickAction={handleQuickAction}
+                />
+              </motion.div>
+            ) : activeView === 'history' ? (
+              <motion.div
+                key="history-view"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                className="flex flex-1 min-h-0 flex-col"
+              >
+                <HistoryPage />
+              </motion.div>
+            ) : activeView === 'guide' ? (
+              <motion.div
+                key="guide-view"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                className="flex flex-1 min-h-0 flex-col"
+              >
+                <PCGuidePage publicStatus={publicStatus} onNavigateView={setActiveView} />
+              </motion.div>
+            ) : (
+              <motion.main
+                key="assistant-view"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                className="relative z-10 flex flex-1 min-h-0 flex-col items-center justify-between overflow-y-auto px-4 sm:px-6 pt-3 pb-2"
+              >
+                {/* First-Time Guide Banner */}
+                {!guideBannerDismissed && !publicStatus.agentOnline && (
+                  <div className="w-full max-w-2xl mb-2 flex items-center justify-between gap-3 rounded-xl border border-white/[0.09] bg-[#070B14]/92 px-3.5 py-2 text-xs text-slate-300 shadow-md shadow-black/40">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <BookOpen className={`h-3.5 w-3.5 shrink-0 ${ui.accentIcon}`} />
+                      <span className="truncate">
+                        New to PC Controls? Follow the step-by-step setup guide to connect your PC.
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={handleCopyLatest}
-                        className="flex items-center gap-1 text-xs text-slate-400 hover:text-cyan-300 transition-colors shrink-0 cursor-pointer"
+                        onClick={() => setActiveView('guide')}
+                        className={`font-semibold ${ui.accentText} hover:underline cursor-pointer whitespace-nowrap`}
                       >
-                        {copiedReply ? (
-                          <>
-                            <Check className="h-3.5 w-3.5 text-cyan-400" />
-                            <span className="text-cyan-300">Copied</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3.5 w-3.5" />
-                            <span>Copy</span>
-                          </>
-                        )}
+                        Open Guide
                       </button>
-                    </div>
-
-                    <div className="jarvis-scroll max-h-36 sm:max-h-44 overflow-y-auto pr-1 text-sm sm:text-[15px] leading-relaxed text-slate-100">
-                      <RevealText
-                        text={latestAssistantMsg.content}
-                        active={assistantState === 'speaking'}
-                      />
-                    </div>
-
-                    {latestPcCmd && (
-                      <PCApprovalCard
-                        command={latestPcCmd}
-                        pinConfigured={Boolean(pcSettings?.pin_configured)}
-                        onDecide={handleDecideCommand}
-                      />
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center text-center">
-                    <div className="font-algerian text-2xl sm:text-3xl font-bold text-cyan-300 mb-1.5">
-                      JARVIS
-                    </div>
-                    <h1
-                      className="text-lg sm:text-xl font-medium text-white tracking-tight"
-                      style={{ textWrap: 'balance' }}
-                    >
-                      {greeting.headline}
-                    </h1>
-                    <p className="mt-1 text-xs sm:text-sm text-slate-400 max-w-md">
-                      {greeting.subline}
-                    </p>
-
-                    <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-                      {QUICK_PROMPTS.map((item) => (
-                        <button
-                          key={item.label}
-                          type="button"
-                          onClick={() => handleSendText(item.prompt, 'typed')}
-                          className="rounded-xl border border-white/[0.1] bg-[#060B16]/90 px-3.5 py-2 text-xs font-medium text-slate-300 hover:border-cyan-400/45 hover:bg-cyan-500/12 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          {item.label}
-                        </button>
-                      ))}
+                      <button
+                        type="button"
+                        onClick={handleDismissGuideBanner}
+                        aria-label="Dismiss guide banner"
+                        className="p-0.5 text-slate-500 hover:text-white cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   </div>
                 )}
-              </div>
-            </div>
 
-            <VoiceControls
-              state={assistantState}
-              continuousMode={continuousMode}
-              pushToTalkActive={pushToTalkActive}
-              speechRecognitionSupported={speechRecognitionSupported}
-              onToggleTalk={handleToggleTalk}
-              onStopSpeaking={handleStopSpeaking}
-              onPushToTalkStart={handlePushToTalkStart}
-              onPushToTalkEnd={handlePushToTalkEnd}
-              onSendText={handleSendText}
-            />
-          </main>
-        )}
+                {/* Active App Locks Live Countdown Strip */}
+                {publicStatus.activeLocks.length > 0 && (
+                  <div className="w-full max-w-2xl mb-2 rounded-xl border border-amber-500/30 bg-[#120D05]/92 px-3.5 py-2 text-xs text-amber-100 space-y-1.5 shadow-md shadow-black/40">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        {publicStatus.activeLocks.map((lock) => {
+                          const remSec = Math.max(
+                            0,
+                            Math.ceil((Date.parse(lock.ends_at) - lockClock) / 1000)
+                          );
+                          const mins = Math.floor(remSec / 60);
+                          const secs = remSec % 60;
+                          return (
+                            <span
+                              key={lock.id}
+                              className="inline-flex items-center gap-1.5 font-mono tabular-nums"
+                            >
+                              <Lock className="h-3 w-3 text-amber-300" />
+                              <span className="font-sans font-medium text-white">{lock.app}</span>
+                              <span className="text-amber-300">
+                                {mins}m {secs.toString().padStart(2, '0')}s
+                              </span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveView('pc-control')}
+                        className="text-[11px] font-medium text-amber-200 hover:text-white underline underline-offset-2 cursor-pointer"
+                      >
+                        Manage locks
+                      </button>
+                    </div>
+                    {!publicStatus.agentOnline && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-amber-300/90">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          PC Agent is offline — locks cannot close running apps until the agent is running.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
-        <TranscriptDrawer
-          open={historyOpen}
-          messages={messages}
-          commandsById={commandsById}
-          pinConfigured={Boolean(pcSettings?.pin_configured)}
-          onDecideCommand={handleDecideCommand}
-          onClose={() => setHistoryOpen(false)}
-          onClear={handleClearConversation}
-          onReplayMessage={handleReplayMessage}
-        />
-      </div>
-    </KineticGrid>
+                <ActiveTasksTray
+                  tasks={activeTasks}
+                  colorTheme={colorTheme}
+                  nowMs={taskClock}
+                  onDismissTask={handleDismissTask}
+                />
+
+                <div className="flex flex-1 flex-col items-center justify-center w-full max-w-3xl mx-auto py-2">
+                  {/* Refined Status Line */}
+                  <div className="mb-1.5 text-xs font-medium tracking-wide">
+                    <span
+                      className={`transition-colors duration-200 ${
+                        assistantState === 'listening'
+                          ? ui.stateListening
+                          : assistantState === 'speaking'
+                          ? ui.stateSpeaking
+                          : assistantState === 'thinking'
+                          ? ui.stateThinking
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      {stateTitle}
+                    </span>
+                  </div>
+
+                  {/* Three.js WebGL Plasma Sphere + Signature Voice Stage */}
+                  <JarvisOrb
+                    state={assistantState}
+                    colorTheme={colorTheme}
+                    audioLevelRef={audioLevelRef}
+                    speechPulseRef={speechPulseRef}
+                    onOrbClick={handleOrbClick}
+                  />
+
+                  {/* Live Transcription & Response Stage */}
+                  <div className="mt-4 w-full max-w-2xl px-1">
+                    <AnimatePresence>
+                      {errorMessage && (
+                        <motion.div
+                          key="error-banner"
+                          role="alert"
+                          initial={{ opacity: 0, y: -6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -6 }}
+                          transition={{ duration: 0.18 }}
+                          className="mb-3 rounded-xl border border-rose-500/30 bg-[#140A0E]/95 px-4 py-3 text-sm text-rose-200 flex items-start justify-between gap-3 shadow-lg shadow-black/40"
+                        >
+                          <p className="leading-relaxed">{errorMessage}</p>
+                          <button
+                            type="button"
+                            onClick={() => setErrorMessage(null)}
+                            className="text-xs font-medium text-rose-300 hover:text-white shrink-0 transition-colors cursor-pointer"
+                          >
+                            Dismiss
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    <AnimatePresence mode="wait" initial={false}>
+                      <motion.div
+                        key={stageKey}
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      >
+                        {assistantState === 'listening' ? (
+                          <div className="min-h-[68px] flex items-center justify-center px-4 py-3 text-center">
+                            {hasTranscriptText ? (
+                              <p className="text-base sm:text-lg leading-relaxed text-white max-w-xl">
+                                <span>{liveFinalText}</span>
+                                {liveFinalText && liveInterimText ? ' ' : ''}
+                                <span className={`${ui.accentText} opacity-85`}>
+                                  {liveInterimText}
+                                </span>
+                              </p>
+                            ) : (
+                              <p className="text-sm sm:text-base text-slate-400">
+                                {wakeWordMode && !continuousMode && !pushToTalkActive
+                                  ? 'Say “Hey Jarvis” whenever you are ready.'
+                                  : 'Go ahead—I am listening.'}
+                              </p>
+                            )}
+                          </div>
+                        ) : assistantState === 'thinking' ? (
+                          <div className="min-h-[68px] flex flex-col items-center justify-center px-4 py-3 text-center">
+                            {latestUserMsg && (
+                              <p className="text-sm text-slate-400 line-clamp-2 max-w-lg mb-1.5">
+                                “{latestUserMsg.content}”
+                              </p>
+                            )}
+                            <p className={`text-sm font-medium ${ui.accentTextSoft}`}>
+                              {thinkingLine}
+                            </p>
+                          </div>
+                        ) : latestAssistantMsg ? (
+                          <div className="rounded-2xl border border-white/[0.08] bg-[#070B14]/94 px-5 py-4 shadow-xl shadow-black/50">
+                            <div className="mb-2.5 flex items-center justify-between gap-3 text-xs text-slate-400">
+                              <div className="flex items-center gap-1.5 min-w-0 truncate">
+                                <span className={`font-semibold ${ui.accentText}`}>JARVIS</span>
+                                {latestAssistantMsg.providerName && (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span>{latestAssistantMsg.providerName}</span>
+                                  </>
+                                )}
+                                {latestAssistantMsg.modelUsed && (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="font-mono text-[11px] text-slate-500 truncate">
+                                      {latestAssistantMsg.modelUsed}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={handleCopyLatest}
+                                className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-slate-400 hover:bg-white/[0.05] ${ui.copyHover} transition-colors shrink-0 cursor-pointer`}
+                              >
+                                {copiedReply ? (
+                                  <>
+                                    <Check className={`h-3.5 w-3.5 ${ui.accentIcon}`} />
+                                    <span className={ui.accentText}>Copied</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3.5 w-3.5" />
+                                    <span>Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+
+                            <div className="jarvis-scroll max-h-48 sm:max-h-60 overflow-y-auto pr-1 text-sm sm:text-[15px] leading-relaxed text-slate-100">
+                              <RevealText
+                                text={latestAssistantMsg.content}
+                                active={assistantState === 'speaking'}
+                                colorTheme={colorTheme}
+                              />
+                            </div>
+
+                            {latestPcCmds.map((cmd) => (
+                              <PCApprovalCard
+                                key={cmd.id}
+                                command={cmd}
+                                isAdmin={Boolean(adminToken)}
+                                onDecide={handleDecideCommand}
+                              />
+                            ))}
+
+                            {(latestResearchJob ||
+                              (latestAssistantMsg.sources &&
+                                latestAssistantMsg.sources.length > 0)) && (
+                              <ResearchBriefCard
+                                job={latestResearchJob}
+                                sources={latestAssistantMsg.sources}
+                                colorTheme={colorTheme}
+                              />
+                            )}
+
+                            {latestAssistantMsg.pendingAction && (
+                              <ChatPasscodeActionCard
+                                messageId={latestAssistantMsg.id}
+                                pendingAction={latestAssistantMsg.pendingAction}
+                                onConfirmAction={handleConfirmChatAction}
+                              />
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center text-center">
+                            <div
+                              className={`font-algerian text-2xl sm:text-3xl font-bold ${ui.accentText} mb-2 transition-colors`}
+                            >
+                              JARVIS
+                            </div>
+                            <h1
+                              className="text-lg sm:text-xl font-medium text-white tracking-tight"
+                              style={{ textWrap: 'balance' }}
+                            >
+                              {greeting.headline}
+                            </h1>
+                            <p className="mt-1.5 text-xs sm:text-sm text-slate-400 max-w-md leading-relaxed">
+                              {greeting.subline}
+                            </p>
+
+                            <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                              {QUICK_PROMPTS.map((item) => (
+                                <button
+                                  key={item.label}
+                                  type="button"
+                                  onClick={() => handleSendText(item.prompt, 'typed')}
+                                  className={`rounded-lg border border-white/[0.08] bg-white/[0.03] px-3.5 py-2 text-xs font-medium text-slate-300 hover:-translate-y-0.5 ${ui.promptHover} hover:bg-white/[0.07] hover:text-white active:translate-y-0 transition-all duration-150 whitespace-nowrap shrink-0 cursor-pointer`}
+                                >
+                                  {item.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </motion.div>
+                    </AnimatePresence>
+                  </div>
+                </div>
+
+                <VoiceControls
+                  state={assistantState}
+                  colorTheme={colorTheme}
+                  continuousMode={continuousMode}
+                  pushToTalkActive={pushToTalkActive}
+                  speechRecognitionSupported={speechRecognitionSupported}
+                  onToggleTalk={handleToggleTalk}
+                  onStopSpeaking={handleStopSpeaking}
+                  onPushToTalkStart={handlePushToTalkStart}
+                  onPushToTalkEnd={handlePushToTalkEnd}
+                  onSendText={handleSendText}
+                />
+              </motion.main>
+            )}
+          </AnimatePresence>
+
+          <TranscriptDrawer
+            open={historyOpen}
+            colorTheme={colorTheme}
+            messages={messages}
+            commandsById={commandsById}
+            researchJobsById={researchJobs}
+            isAdmin={Boolean(adminToken)}
+            onDecideCommand={handleDecideCommand}
+            onConfirmChatAction={handleConfirmChatAction}
+            onClose={() => setHistoryOpen(false)}
+            onClear={handleClearConversation}
+            onReplayMessage={handleReplayMessage}
+          />
+        </div>
+      </KineticGrid>
+    </MotionConfig>
   );
 }

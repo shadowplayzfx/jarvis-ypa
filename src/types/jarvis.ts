@@ -1,8 +1,9 @@
-export type ProviderId = 'groq' | 'openrouter' | 'gemini';
+export type ProviderId = 'groq' | 'opentyphoon' | 'openrouter' | 'gemini';
 export type ProviderPreference = 'auto' | ProviderId;
 
 export type AssistantState = 'idle' | 'listening' | 'thinking' | 'speaking';
-export type AppView = 'assistant' | 'pc-control';
+export type AppView = 'assistant' | 'pc-control' | 'history' | 'guide';
+export type JarvisColorTheme = 'blue' | 'purple' | 'green' | 'yellow';
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -14,16 +15,14 @@ export interface ProviderInfo {
 
 export type PCAction =
   | 'open_app'
+  | 'close_app'
   | 'open_url'
   | 'search_web'
   | 'media_control'
   | 'volume'
-  | 'close_app'
-  | 'type_text'
   | 'screenshot'
-  | 'lock_screen'
-  | 'restart'
-  | 'shutdown';
+  | 'lock_app'
+  | 'unlock_app';
 
 export type PCRiskLevel = 'low' | 'medium' | 'high';
 
@@ -40,6 +39,27 @@ export type PCApprovalMode =
   | 'ask_always'
   | 'auto_low_risk'
   | 'auto_all_except_high';
+
+export interface AllowedAppEntry {
+  id: string;
+  displayName: string;
+  aliases: string[];
+  launchCommand: string;
+  processName: string;
+}
+
+export type AppLockStatus = 'active' | 'expired' | 'unlocked';
+
+export interface AppLock {
+  id: string;
+  app: string;
+  process_name: string;
+  started_at: string;
+  ends_at: string;
+  locked_by: string;
+  status: AppLockStatus;
+  unlocked_at?: string;
+}
 
 export interface PCCommand {
   id: string;
@@ -61,9 +81,74 @@ export interface PCSettings {
   approval_mode: PCApprovalMode;
   agent_token: string;
   agent_last_seen: string | null;
-  allowed_apps: string[];
+  allowed_apps: AllowedAppEntry[];
   voice_wake_word_enabled: boolean;
-  pin_configured: boolean;
+}
+
+export interface PCPublicStatus {
+  pc_control_enabled: boolean;
+  kill_switch: boolean;
+  agentOnline: boolean;
+  agent_last_seen: string | null;
+  allowedAppsCount: number;
+  activeLocks: AppLock[];
+  permittedApps?: Array<{ id: string; displayName: string }>;
+}
+
+export interface PendingChatAction {
+  type: 'grant_app' | 'revoke_app' | 'unlock_app';
+  appName: string;
+  lockId?: string;
+  aliases?: string[];
+  launchCommand?: string;
+  processName?: string;
+  resolved?: boolean;
+  statusText?: string;
+}
+
+export interface ResearchSource {
+  title: string;
+  url: string;
+  domain: string;
+  snippet: string;
+}
+
+export type ResearchJobStatus =
+  | 'queued'
+  | 'planning'
+  | 'searching'
+  | 'reading'
+  | 'synthesizing'
+  | 'done'
+  | 'failed';
+
+export interface ResearchJob {
+  id: string;
+  query: string;
+  status: ResearchJobStatus;
+  stepLabel: string;
+  subQueries: string[];
+  sources: ResearchSource[];
+  report?: string;
+  spokenSummary?: string;
+  providerName?: string;
+  modelUsed?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ActiveTaskKind = 'chat' | 'research' | 'pc';
+
+export interface ActiveTask {
+  id: string;
+  kind: ActiveTaskKind;
+  title: string;
+  detail: string;
+  status: 'running' | 'done' | 'failed';
+  startedAt: number;
+  researchJobId?: string;
+  pcCommandIds?: string[];
 }
 
 export interface ChatMessage {
@@ -74,4 +159,8 @@ export interface ChatMessage {
   providerName?: string;
   modelUsed?: string;
   pcCommandId?: string;
+  pcCommandIds?: string[];
+  pendingAction?: PendingChatAction;
+  researchJobId?: string;
+  sources?: ResearchSource[];
 }

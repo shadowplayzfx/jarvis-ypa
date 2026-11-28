@@ -4,23 +4,56 @@ import type { PCCommand } from '../types/jarvis';
 
 interface PCApprovalCardProps {
   command: PCCommand;
-  pinConfigured: boolean;
+  isAdmin: boolean;
   onDecide: (
     id: string,
     decision: 'approve' | 'deny',
-    opts?: { pin?: string; alwaysAllowApp?: boolean }
+    opts?: { passcode?: string; alwaysAllowApp?: boolean }
   ) => Promise<string | null>;
 }
 
 const EXPIRY_SECONDS = 60;
 
+function formatHumanActionTitle(command: PCCommand): string {
+  const p = command.params;
+  switch (command.action) {
+    case 'open_app':
+      return `Open ${String(p.name || 'app')}`;
+    case 'close_app':
+      return `Close ${String(p.name || 'app')}`;
+    case 'open_url':
+      return `Open link ${String(p.url || '')}`;
+    case 'search_web':
+      return `Search ${String(p.engine || 'Google')} for “${String(p.query || '')}”`;
+    case 'media_control': {
+      const k = String(p.key || 'playpause');
+      return k === 'next'
+        ? 'Skip to next track'
+        : k === 'prev'
+        ? 'Go to previous track'
+        : 'Play or pause media';
+    }
+    case 'volume': {
+      const dir = String(p.direction || 'up');
+      if (dir === 'mute') return 'Toggle volume mute';
+      return `Turn volume ${dir} (${Number(p.steps || 2)} steps)`;
+    }
+    case 'screenshot':
+      return 'Save a Desktop screenshot';
+    case 'lock_app':
+      return `Lock ${String(p.app || 'app')}`;
+    case 'unlock_app':
+      return `Unlock ${String(p.app || 'app')}`;
+  }
+}
+
 export function PCApprovalCard({
   command,
-  pinConfigured,
+  isAdmin,
   onDecide,
 }: PCApprovalCardProps) {
   const [alwaysAllowApp, setAlwaysAllowApp] = useState(false);
-  const [pin, setPin] = useState('');
+  const [passcode, setPasscode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(() => {
@@ -39,72 +72,87 @@ export function PCApprovalCard({
     return () => window.clearInterval(id);
   }, [command.created_at, command.status]);
 
+  const requiresPasscode = command.risk_level === 'high' || !isAdmin;
+
   const handleDecision = async (decision: 'approve' | 'deny') => {
+    if (decision === 'approve' && requiresPasscode && !passcode) {
+      setActionError('Enter the admin passcode to approve this action.');
+      return;
+    }
     setSubmitting(true);
     setActionError(null);
     const err = await onDecide(command.id, decision, {
-      pin: pin.trim() || undefined,
+      passcode: passcode || undefined,
       alwaysAllowApp,
     });
     setSubmitting(false);
-    if (err) setActionError(err);
+    if (err) {
+      setActionError(err);
+    } else {
+      setPasscode('');
+    }
   };
 
   const canAlwaysAllow = command.action === 'open_app' || command.action === 'close_app';
   const appTarget = typeof command.params.name === 'string' ? command.params.name : '';
 
-  const riskBadgeStyle =
+  const riskText =
     command.risk_level === 'high'
-      ? 'text-rose-300 border-rose-500/35 bg-rose-500/12'
+      ? 'Passcode required'
       : command.risk_level === 'medium'
-      ? 'text-amber-300 border-amber-500/35 bg-amber-500/12'
-      : 'text-cyan-300 border-cyan-500/35 bg-cyan-500/12';
+      ? 'Medium risk'
+      : 'Low risk';
 
   const statusLabel =
     command.status === 'pending_approval'
       ? 'Waiting for approval'
       : command.status === 'approved'
-      ? 'Approved · Queued for PC'
+      ? 'Sent to your PC'
       : command.status === 'running'
-      ? 'Running on PC'
+      ? 'Running on your PC'
       : command.status === 'done'
       ? 'Completed'
       : command.status === 'failed'
-      ? 'Failed'
+      ? 'Could not run'
       : command.status === 'expired'
-      ? 'Expired'
-      : 'Denied';
+      ? 'Timed out'
+      : 'Declined';
 
   return (
-    <div className="mt-3 rounded-xl border border-white/[0.1] bg-[#060B16]/95 p-3.5 text-left">
+    <div className="mt-3 rounded-xl border border-white/[0.09] bg-[#060B16]/90 p-3.5 text-left">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           {command.risk_level === 'high' ? (
             <ShieldAlert className="h-4 w-4 text-rose-400 shrink-0" />
           ) : (
             <ShieldCheck className="h-4 w-4 text-cyan-400 shrink-0" />
           )}
-          <span className="font-mono text-xs font-medium text-white">
-            {command.action}
-          </span>
-          <span className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${riskBadgeStyle}`}>
-            {command.risk_level.toUpperCase()} RISK
+          <span className="text-xs sm:text-sm font-medium text-white truncate">
+            {formatHumanActionTitle(command)}
           </span>
         </div>
 
-        <span className="font-mono text-[11px] text-slate-400 tabular-nums">
-          {command.status === 'pending_approval' ? `${secondsLeft}s left` : statusLabel}
-        </span>
+        <div className="flex items-center gap-2 text-xs text-slate-400 tabular-nums shrink-0">
+          <span
+            className={
+              command.risk_level === 'high'
+                ? 'text-rose-300'
+                : command.risk_level === 'medium'
+                ? 'text-amber-300'
+                : 'text-slate-400'
+            }
+          >
+            {riskText}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span>
+            {command.status === 'pending_approval' ? `${secondsLeft}s left` : statusLabel}
+          </span>
+        </div>
       </div>
 
-      {Object.keys(command.params).length > 0 && (
-        <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/50 px-3 py-2 font-mono text-xs text-cyan-100 overflow-x-auto">
-          {JSON.stringify(command.params)}
-        </div>
-      )}
-
       {command.result_message && command.status !== 'pending_approval' && (
-        <p className="mt-2 text-xs text-slate-300">{command.result_message}</p>
+        <p className="mt-2 text-xs text-slate-300 leading-relaxed">{command.result_message}</p>
       )}
 
       {command.status === 'pending_approval' && (
@@ -121,14 +169,18 @@ export function PCApprovalCard({
             </label>
           )}
 
-          {command.risk_level === 'high' && pinConfigured && (
+          {requiresPasscode && (
             <div className="flex items-center gap-2">
               <Lock className="h-3.5 w-3.5 text-rose-300 shrink-0" />
               <input
                 type="password"
-                value={pin}
-                onChange={(e) => setPin(e.target.value)}
-                placeholder="Enter High-Risk PIN"
+                value={passcode}
+                onChange={(e) => setPasscode(e.target.value)}
+                placeholder={
+                  command.risk_level === 'high'
+                    ? 'Enter admin passcode to confirm'
+                    : 'Enter admin passcode'
+                }
                 className="w-full rounded-lg border border-rose-500/30 bg-black/60 px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-400"
               />
             </div>
@@ -141,7 +193,7 @@ export function PCApprovalCard({
               type="button"
               disabled={submitting || secondsLeft === 0}
               onClick={() => handleDecision('approve')}
-              className="flex h-9 items-center gap-1.5 rounded-lg bg-cyan-500 px-3.5 text-xs font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-40 transition-colors cursor-pointer"
+              className="flex h-9 items-center gap-1.5 rounded-lg bg-cyan-400 px-3.5 text-xs font-semibold text-slate-950 hover:bg-cyan-300 disabled:opacity-40 transition-colors cursor-pointer"
             >
               <Check className="h-3.5 w-3.5" />
               <span>Approve</span>
@@ -154,12 +206,12 @@ export function PCApprovalCard({
               className="flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.12] bg-white/[0.04] px-3.5 text-xs font-medium text-slate-200 hover:bg-rose-500/15 hover:border-rose-400/40 hover:text-rose-200 disabled:opacity-40 transition-colors cursor-pointer"
             >
               <X className="h-3.5 w-3.5" />
-              <span>Deny</span>
+              <span>Decline</span>
             </button>
 
-            {command.risk_level !== 'high' && (
+            {command.risk_level !== 'high' && isAdmin && (
               <span className="ml-auto hidden sm:inline text-[11px] text-slate-500">
-                Or say “Approve” / “Deny”
+                Or say “Approve” / “Cancel”
               </span>
             )}
           </div>

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { cn } from '../../lib/utils';
+import { JARVIS_THEMES } from '../../lib/jarvisThemes';
+import type { JarvisColorTheme } from '../../types/jarvis';
 
 interface Point {
   x: number;
@@ -44,10 +46,12 @@ export default function KineticGrid({
   children,
   className,
   globalColor = 'default',
+  colorTheme = 'blue',
 }: {
   children?: ReactNode;
   className?: string;
   globalColor?: 'default' | 'monochrome';
+  colorTheme?: JarvisColorTheme;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -56,6 +60,11 @@ export default function KineticGrid({
   const ripplesRef = useRef<Ripple[]>([]);
   const rafRef = useRef<number>(0);
   const sizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  const colorThemeRef = useRef<JarvisColorTheme>(colorTheme);
+
+  useEffect(() => {
+    colorThemeRef.current = colorTheme;
+  }, [colorTheme]);
 
   const getWarpedPoint = useCallback(
     (
@@ -127,22 +136,17 @@ export default function KineticGrid({
       const mouse = mouseRef.current;
       const ripples = ripplesRef.current;
 
-      const theme = {
-        default: {
-          bg: '#020409',
-          lineActive: { r: 0, g: 188, b: 212, a: 0.65 },
-          nodeActive: { r: 74, g: 158, b: 255, a: 0.95 },
-          glow: '0,188,212',
-          ripple: '74,158,255',
-        },
-        monochrome: {
-          bg: '#000000',
-          lineActive: { r: 255, g: 255, b: 255, a: 0.75 },
-          nodeActive: { r: 255, g: 255, b: 255, a: 0.95 },
-          glow: '255,255,255',
-          ripple: '255,255,255',
-        },
-      }[globalColor ?? 'default'];
+      const activeGrid = JARVIS_THEMES[colorThemeRef.current].grid;
+      const theme =
+        globalColor === 'monochrome'
+          ? {
+              bg: '#000000',
+              lineActive: { r: 255, g: 255, b: 255, a: 0.75 },
+              nodeActive: { r: 255, g: 255, b: 255, a: 0.95 },
+              glow: '255,255,255',
+              ripple: '255,255,255',
+            }
+          : activeGrid;
 
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = theme.bg;
@@ -319,11 +323,26 @@ export default function KineticGrid({
     };
   }, [animate, draw]);
 
+  useEffect(() => {
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ) {
+      draw(performance.now());
+    }
+  }, [colorTheme, draw]);
+
+  const bgClass =
+    globalColor === 'monochrome'
+      ? 'bg-[#000000]'
+      : JARVIS_THEMES[colorTheme].grid.bgClass;
+
   return (
     <div
       className={cn(
-        'relative w-full min-h-[100dvh] overflow-hidden',
-        globalColor === 'monochrome' ? 'bg-[#000000]' : 'bg-[#020409]',
+        'relative w-full min-h-[100dvh] overflow-hidden transition-colors duration-300',
+        bgClass,
         className
       )}
     >
